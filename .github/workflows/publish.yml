@@ -119,7 +119,7 @@ jobs:
           CHANNEL: ${{ inputs.channel }}
         run: |
           set -euo pipefail
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1 || git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
             echo "Release tag already exists; refusing to overwrite immutable updater assets." >&2
             exit 1
           fi
@@ -132,6 +132,13 @@ jobs:
           gh release create "$RELEASE_TAG" candidate/* "${args[@]}"
           if [[ "$CHANNEL" == beta ]]; then
             if gh release view beta-latest >/dev/null 2>&1; then
+              current_assets="$(gh release view beta-latest --json assets --jq '.assets[].name' | sort)"
+              new_assets="$(find candidate -maxdepth 1 -type f -printf '%f
+' | sort)"
+              if [[ "$current_assets" != "$new_assets" ]]; then
+                echo "beta-latest asset set changed; refusing partial clobber." >&2
+                exit 1
+              fi
               gh release upload beta-latest candidate/* --clobber
               gh release edit beta-latest --title "$RELEASE_TITLE" --notes "$RELEASE_NOTES" --prerelease --latest=false
             else
@@ -149,6 +156,11 @@ jobs:
           gh release download "$RELEASE_TAG" --dir downloaded
           (cd downloaded && sha256sum -c SHA256SUMS.txt)
           public_tag="$RELEASE_TAG"
-          if [[ "$CHANNEL" == beta ]]; then public_tag=beta-latest; fi
+          if [[ "$CHANNEL" == beta ]]; then
+            public_tag=beta-latest
+            mkdir beta-downloaded
+            gh release download beta-latest --dir beta-downloaded
+            (cd beta-downloaded && sha256sum -c SHA256SUMS.txt)
+          fi
           curl --fail --location --retry 5 --output /tmp/latest.json "https://github.com/Jia-Ethan/keysmith-switch-releases/releases/download/$public_tag/latest.json"
           cmp downloaded/latest.json /tmp/latest.json

@@ -109,8 +109,18 @@ jobs:
             echo "source release workflow did not complete successfully." >&2
             exit 1
           }
-          [[ "$(jq -r .head_sha <<<"$run")" == "$SOURCE_COMMIT" ]] || { echo "source run commit does not match source tag." >&2; exit 1; }
-          [[ "$(jq -r .head_branch <<<"$run")" == "$SOURCE_TAG" ]] || { echo "source run was not dispatched from source tag." >&2; exit 1; }
+          tag_object="$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $ARTIFACT_DOWNLOAD_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/Jia-Ethan/keysmith-switch/git/ref/tags/$SOURCE_TAG" | jq -er .object.sha)"
+          tag="$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $ARTIFACT_DOWNLOAD_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/Jia-Ethan/keysmith-switch/git/tags/$tag_object")"
+          [[ "$(jq -r .verification.verified <<<"$tag")" == true ]] || { echo "source_tag must have a GitHub-verified signature." >&2; exit 1; }
+          [[ "$(jq -r .object.sha <<<"$tag")" == "$SOURCE_COMMIT" ]] || { echo "verified tag commit mismatch." >&2; exit 1; }
       - name: Download signed source candidates
         env:
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
@@ -140,7 +150,14 @@ jobs:
           set -euo pipefail
           [[ -n "$TAURI_UPDATER_PUBLIC_KEY" ]] || { echo "TAURI_UPDATER_PUBLIC_KEY is required." >&2; exit 1; }
           test -s candidate/latest.json
+          test -s candidate/provenance.json
           test -s candidate/SHA256SUMS.txt
+          jq -e \
+            --arg tag "$SOURCE_TAG" \
+            --arg commit "$SOURCE_COMMIT" \
+            --arg run_id "${{ inputs.source_run_id }}" \
+            '.repository == "Jia-Ethan/keysmith-switch" and .source_tag == $tag and .source_commit == $commit and .workflow_run_id == $run_id' \
+            candidate/provenance.json >/dev/null
           version="$(jq -er .version candidate/latest.json)"
           [[ "v$version" == "$SOURCE_TAG" ]] || { echo "Candidate version does not match source_tag." >&2; exit 1; }
           mapfile -t payloads < <(find candidate -maxdepth 1 -type f \( -name '*.app.tar.gz' -o -name '*.exe' \) -print | sort)

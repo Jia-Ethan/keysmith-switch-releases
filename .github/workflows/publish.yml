@@ -1,0 +1,143 @@
+name: publish-updater-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Successful keysmith-switch release workflow run ID
+        required: true
+        type: string
+      source_repository:
+        description: Source repository
+        required: true
+        default: Jia-Ethan/keysmith-switch
+        type: string
+      channel:
+        description: Release channel
+        required: true
+        type: choice
+        options: [stable, beta]
+      tag:
+        description: Immutable release tag, for example v0.2.0 or v0.2.0-beta.1
+        required: true
+        type: string
+      expected_commit:
+        description: Full source commit SHA built by the source workflow
+        required: true
+        type: string
+      title:
+        description: Release title
+        required: true
+        type: string
+      notes:
+        description: Public release notes
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: updater-${{ inputs.channel }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate request
+        env:
+          SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_REPOSITORY" == "Jia-Ethan/keysmith-switch" ]] || { echo "Unexpected source repository." >&2; exit 1; }
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]] || { echo "source_run_id must be numeric." >&2; exit 1; }
+          [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "expected_commit must be a full SHA." >&2; exit 1; }
+          if [[ "$CHANNEL" == stable ]]; then
+            [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Stable tags must be vMAJOR.MINOR.PATCH." >&2; exit 1; }
+          else
+            [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z][0-9A-Za-z.-]*$ ]] || { echo "Beta tags must be immutable prerelease versions." >&2; exit 1; }
+          fi
+      - name: Inspect source workflow run
+        env:
+          GH_TOKEN: ${{ secrets.SOURCE_REPOSITORY_TOKEN }}
+          SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+        run: |
+          set -euo pipefail
+          run_json="$(gh api "repos/$SOURCE_REPOSITORY/actions/runs/$SOURCE_RUN_ID")"
+          [[ "$(jq -r .name <<<"$run_json")" == release ]] || { echo "Source run is not the release workflow." >&2; exit 1; }
+          [[ "$(jq -r .event <<<"$run_json")" == workflow_dispatch ]] || { echo "Source run was not manually dispatched." >&2; exit 1; }
+          [[ "$(jq -r .status <<<"$run_json")" == completed ]] || { echo "Source run is not complete." >&2; exit 1; }
+          [[ "$(jq -r .conclusion <<<"$run_json")" == success ]] || { echo "Source run did not succeed." >&2; exit 1; }
+          [[ "$(jq -r .head_branch <<<"$run_json")" == main ]] || { echo "Source run was not built from main." >&2; exit 1; }
+          [[ "$(jq -r .head_sha <<<"$run_json")" == "$EXPECTED_COMMIT" ]] || { echo "Source run commit mismatch." >&2; exit 1; }
+      - name: Download verified candidate
+        env:
+          GH_TOKEN: ${{ secrets.SOURCE_REPOSITORY_TOKEN }}
+          SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          mkdir candidate
+          gh run download "$SOURCE_RUN_ID" --repo "$SOURCE_REPOSITORY" --name "keysmith-switch-release-$CHANNEL" --dir candidate
+      - name: Validate candidate payload
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          test -s candidate/latest.json
+          mapfile -t updaters < <(find candidate -maxdepth 1 -type f \( -name '*.app.tar.gz' -o -name '*.exe' \) -print)
+          [[ ${#updaters[@]} -eq 2 ]] || { echo "Expected exactly two updater artifacts." >&2; exit 1; }
+          for artifact in "${updaters[@]}"; do
+            test -s "$artifact.sig"
+          done
+          version="$(jq -er .version candidate/latest.json)"
+          [[ "$RELEASE_TAG" == "v$version" ]] || { echo "Tag and metadata version mismatch." >&2; exit 1; }
+          [[ "$(jq '.platforms | length' candidate/latest.json)" == 2 ]] || { echo "Expected two updater platforms." >&2; exit 1; }
+          if [[ "$CHANNEL" == stable ]]; then
+            jq -e '.. | strings | select(test("/releases/latest/download/"))' candidate/latest.json >/dev/null
+          else
+            jq -e --arg tag "$RELEASE_TAG" '.. | strings | select(contains("/releases/download/" + $tag + "/"))' candidate/latest.json >/dev/null
+          fi
+          (cd candidate && sha256sum latest.json *.app.tar.gz *.app.tar.gz.sig *.exe *.exe.sig > SHA256SUMS.txt)
+      - name: Publish immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_TITLE: ${{ inputs.title }}
+          RELEASE_NOTES: ${{ inputs.notes }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release tag already exists; refusing to overwrite immutable updater assets." >&2
+            exit 1
+          fi
+          args=(--title "$RELEASE_TITLE" --notes "$RELEASE_NOTES" --verify-tag=false)
+          if [[ "$CHANNEL" == beta ]]; then
+            args+=(--prerelease --latest=false)
+          else
+            args+=(--latest)
+          fi
+          gh release create "$RELEASE_TAG" candidate/* "${args[@]}"
+      - name: Verify public downloads
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir downloaded
+          gh release download "$RELEASE_TAG" --dir downloaded
+          (cd downloaded && sha256sum -c SHA256SUMS.txt)
+          curl --fail --location --retry 5 --output /tmp/latest.json "https://github.com/Jia-Ethan/keysmith-switch-releases/releases/download/$RELEASE_TAG/latest.json"
+          cmp downloaded/latest.json /tmp/latest.json

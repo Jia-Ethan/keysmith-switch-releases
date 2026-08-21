@@ -129,10 +129,8 @@ jobs:
               "bundle": {"targets": ["deb"], "createUpdaterArtifacts": True},
               "plugins": {"updater": {"pubkey": pubkey}},
           }), encoding="utf-8")
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
-              handle.write(f"TAURI_UPDATER_LINUX_CONFIG={path}\n")
           PY
-          npx tauri build --bundles deb --config "$TAURI_UPDATER_LINUX_CONFIG"
+          npx tauri build --bundles deb --config "$RUNNER_TEMP/keysmith-updater-linux.json"
       - name: Verify updater bundles
         working-directory: source
         env:

@@ -119,7 +119,7 @@ jobs:
           CHANNEL: ${{ inputs.channel }}
         run: |
           set -euo pipefail
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1 || git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$RELEASE_TAG" >/dev/null 2>&1; then
             echo "Release tag already exists; refusing to overwrite immutable updater assets." >&2
             exit 1
           fi

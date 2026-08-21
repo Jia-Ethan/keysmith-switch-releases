@@ -93,7 +93,6 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag }}
           CHANNEL: ${{ inputs.channel }}
-          SOURCE_REPOSITORY_TOKEN: ${{ secrets.SOURCE_REPOSITORY_TOKEN }}
         run: |
           set -euo pipefail
           test -s candidate/latest.json
@@ -110,7 +109,6 @@ jobs:
           else
             jq -e '.. | strings | select(contains("/releases/download/beta-latest/"))' candidate/latest.json >/dev/null
           fi
-          printf '%s' "$SOURCE_REPOSITORY_TOKEN" > candidate/.source-token
           (cd candidate && sha256sum latest.json *.app.tar.gz *.app.tar.gz.sig *.exe *.exe.sig > SHA256SUMS.txt)
       - name: Publish immutable release
         env:
@@ -127,24 +125,30 @@ jobs:
           fi
           args=(--title "$RELEASE_TITLE" --notes "$RELEASE_NOTES")
           if [[ "$CHANNEL" == beta ]]; then
-            if gh release view beta-latest >/dev/null 2>&1; then
-              gh release delete beta-latest --cleanup-tag --yes
-            fi
-            args+=(--prerelease --latest=false --target "$RELEASE_TAG")
-            release_tag=beta-latest
+            args+=(--prerelease --latest=false)
           else
-            args+=(--latest --target "$RELEASE_TAG")
-            release_tag="$RELEASE_TAG"
+            args+=(--latest)
           fi
-          gh release create "$release_tag" candidate/* "${args[@]}"
+          gh release create "$RELEASE_TAG" candidate/* "${args[@]}"
+          if [[ "$CHANNEL" == beta ]]; then
+            if gh release view beta-latest >/dev/null 2>&1; then
+              gh release upload beta-latest candidate/* --clobber
+              gh release edit beta-latest --title "$RELEASE_TITLE" --notes "$RELEASE_NOTES" --prerelease --latest=false
+            else
+              gh release create beta-latest candidate/* --title "$RELEASE_TITLE" --notes "$RELEASE_NOTES" --prerelease --latest=false
+            fi
+          fi
       - name: Verify public downloads
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
+          CHANNEL: ${{ inputs.channel }}
         run: |
           set -euo pipefail
           mkdir downloaded
           gh release download "$RELEASE_TAG" --dir downloaded
           (cd downloaded && sha256sum -c SHA256SUMS.txt)
-          curl --fail --location --retry 5 --output /tmp/latest.json "https://github.com/Jia-Ethan/keysmith-switch-releases/releases/download/$RELEASE_TAG/latest.json"
+          public_tag="$RELEASE_TAG"
+          if [[ "$CHANNEL" == beta ]]; then public_tag=beta-latest; fi
+          curl --fail --location --retry 5 --output /tmp/latest.json "https://github.com/Jia-Ethan/keysmith-switch-releases/releases/download/$public_tag/latest.json"
           cmp downloaded/latest.json /tmp/latest.json

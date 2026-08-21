@@ -108,7 +108,7 @@ jobs:
           printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" > "$tmp/updater.key"
           chmod 600 "$tmp/updater.key"
           printf 'Keysmith Switch updater publisher key check\n' > "$tmp/artifact.bin"
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" \
+          env -u TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" \
             npx --prefix source tauri signer sign --private-key-path "$tmp/updater.key" "$tmp/artifact.bin" >/dev/null
           printf '%s' "$TAURI_UPDATER_PUBLIC_KEY" > "$tmp/updater.pub"
           cargo run --quiet --manifest-path source/src-tauri/Cargo.toml --example verify_updater -- \

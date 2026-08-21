@@ -44,12 +44,12 @@ jobs:
       - name: Configure read-only source access
         shell: bash
         env:
-          SOURCE_REPOSITORY_DEPLOY_KEY: ${{ secrets.SOURCE_REPOSITORY_DEPLOY_KEY }}
+          SOURCE_REPOSITORY_DEPLOY_KEY_B64: ${{ secrets.SOURCE_REPOSITORY_DEPLOY_KEY_B64 }}
         run: |
           set -euo pipefail
-          [[ -n "$SOURCE_REPOSITORY_DEPLOY_KEY" ]] || { echo "SOURCE_REPOSITORY_DEPLOY_KEY is required." >&2; exit 1; }
+          [[ -n "$SOURCE_REPOSITORY_DEPLOY_KEY_B64" ]] || { echo "SOURCE_REPOSITORY_DEPLOY_KEY_B64 is required." >&2; exit 1; }
           install -d -m 700 ~/.ssh
-          printf '%s' "$SOURCE_REPOSITORY_DEPLOY_KEY" > ~/.ssh/source-repository
+          printf '%s' "$SOURCE_REPOSITORY_DEPLOY_KEY_B64" | base64 --decode > ~/.ssh/source-repository
           chmod 600 ~/.ssh/source-repository
           ssh-keyscan github.com > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts

@@ -133,8 +133,7 @@ jobs:
           if [[ "$CHANNEL" == beta ]]; then
             if gh release view beta-latest >/dev/null 2>&1; then
               current_assets="$(gh release view beta-latest --json assets --jq '.assets[].name' | sort)"
-              new_assets="$(find candidate -maxdepth 1 -type f -printf '%f
-' | sort)"
+              new_assets="$(find candidate -maxdepth 1 -type f -exec basename {} \; | sort)"
               if [[ "$current_assets" != "$new_assets" ]]; then
                 echo "beta-latest asset set changed; refusing partial clobber." >&2
                 exit 1

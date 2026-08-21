@@ -3,8 +3,8 @@ name: publish-updater-release
 on:
   workflow_dispatch:
     inputs:
-      source_commit:
-        description: Full keysmith-switch commit SHA to publish
+      source_tag:
+        description: Signed keysmith-switch tag (vX.Y.Z or vX.Y.Z-prerelease)
         required: true
         type: string
       channel:
@@ -12,6 +12,10 @@ on:
         required: true
         type: choice
         options: [stable, beta]
+      source_run_id:
+        description: Successful private release workflow run containing signed candidates
+        required: true
+        type: string
       title:
         description: Release title
         required: true
@@ -21,28 +25,46 @@ on:
         required: false
         default: ""
         type: string
+      confirmation:
+        description: Enter the exact source tag again to authorize publication
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: updater-${{ inputs.channel }}
   cancel-in-progress: false
 
 jobs:
-  publish:
+  validate:
     runs-on: ubuntu-latest
     steps:
-      - name: Validate request
+      - name: Validate publication request
         env:
-          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          SOURCE_TAG: ${{ inputs.source_tag }}
           CHANNEL: ${{ inputs.channel }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          CONFIRMATION: ${{ inputs.confirmation }}
         run: |
           set -euo pipefail
-          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "source_commit must be a full SHA." >&2; exit 1; }
+          [[ "$SOURCE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || {
+            echo "source_tag must be a complete semantic-version tag." >&2
+            exit 1
+          }
           [[ "$CHANNEL" == stable || "$CHANNEL" == beta ]] || { echo "Unexpected channel." >&2; exit 1; }
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]] || { echo "source_run_id must be numeric." >&2; exit 1; }
+          [[ "$CONFIRMATION" == "$SOURCE_TAG" ]] || { echo "confirmation must exactly match source_tag." >&2; exit 1; }
+          if [[ "$CHANNEL" == beta && "$SOURCE_TAG" != *-* ]]; then
+            echo "Beta releases require a prerelease tag." >&2
+            exit 1
+          fi
+          if [[ "$CHANNEL" == stable && "$SOURCE_TAG" == *-* ]]; then
+            echo "Stable releases require a non-prerelease tag." >&2
+            exit 1
+          fi
       - name: Configure read-only source access
-        shell: bash
         env:
           SOURCE_REPOSITORY_DEPLOY_KEY_B64: ${{ secrets.SOURCE_REPOSITORY_DEPLOY_KEY_B64 }}
         run: |
@@ -53,154 +75,166 @@ jobs:
           chmod 600 ~/.ssh/source-repository
           ssh-keyscan github.com > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
-          {
-            echo 'GIT_SSH_COMMAND=ssh -i ~/.ssh/source-repository -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes'
-          } >> "$GITHUB_ENV"
-      - name: Fetch immutable source commit
+          echo 'GIT_SSH_COMMAND=ssh -i ~/.ssh/source-repository -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes' >> "$GITHUB_ENV"
+      - name: Verify signed source tag
         env:
-          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          SOURCE_TAG: ${{ inputs.source_tag }}
         run: |
           set -euo pipefail
           git init source
           git -C source remote add origin git@github.com:Jia-Ethan/keysmith-switch.git
-          git -C source fetch --depth=1 origin "$SOURCE_COMMIT"
-          [[ "$(git -C source rev-parse FETCH_HEAD)" == "$SOURCE_COMMIT" ]] || { echo "Fetched source commit mismatch." >&2; exit 1; }
-          git -C source checkout --detach FETCH_HEAD
-          [[ "$(git -C source rev-parse HEAD)" == "$SOURCE_COMMIT" ]] || { echo "Checked-out source commit mismatch." >&2; exit 1; }
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: source/package-lock.json
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install Linux Tauri dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-      - name: Build and verify sidecars
-        working-directory: source
+          git -C source fetch --depth=1 origin "refs/tags/$SOURCE_TAG:refs/tags/$SOURCE_TAG"
+          [[ "$(git -C source cat-file -t "$SOURCE_TAG")" == tag ]] || { echo "source_tag must be annotated." >&2; exit 1; }
+          commit="$(git -C source rev-parse "$SOURCE_TAG^{commit}")"
+          version="$(git -C source show "$commit:package.json" | jq -er .version)"
+          [[ "v$version" == "$SOURCE_TAG" ]] || { echo "source tag and package version differ." >&2; exit 1; }
+          echo "SOURCE_COMMIT=$commit" >> "$GITHUB_ENV"
+          echo "SOURCE_VERSION=$version" >> "$GITHUB_ENV"
+      - name: Verify source workflow provenance
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_TAG: ${{ inputs.source_tag }}
+          ARTIFACT_DOWNLOAD_TOKEN: ${{ secrets.SOURCE_ARTIFACT_DOWNLOAD_TOKEN }}
         run: |
           set -euo pipefail
-          npm ci
-          python3 scripts/check-version.py --expected "$(node -p 'require("./package.json").version')"
-          npm test
-          npm run build
-          python3 scripts/build-sidecars.py
-          cargo fmt --check --manifest-path src-tauri/Cargo.toml
-          cargo test --manifest-path src-tauri/Cargo.toml
-      - name: Require updater signing material
-        shell: bash
+          [[ -n "$ARTIFACT_DOWNLOAD_TOKEN" ]] || { echo "SOURCE_ARTIFACT_DOWNLOAD_TOKEN is required." >&2; exit 1; }
+          run="$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $ARTIFACT_DOWNLOAD_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/Jia-Ethan/keysmith-switch/actions/runs/$SOURCE_RUN_ID")"
+          [[ "$(jq -r .name <<<"$run")" == release ]] || { echo "source_run_id is not the release workflow." >&2; exit 1; }
+          [[ "$(jq -r .event <<<"$run")" == workflow_dispatch ]] || { echo "source run was not manually dispatched." >&2; exit 1; }
+          [[ "$(jq -r .status <<<"$run")" == completed && "$(jq -r .conclusion <<<"$run")" == success ]] || {
+            echo "source release workflow did not complete successfully." >&2
+            exit 1
+          }
+          [[ "$(jq -r .head_sha <<<"$run")" == "$SOURCE_COMMIT" ]] || { echo "source run commit does not match source tag." >&2; exit 1; }
+          [[ "$(jq -r .head_branch <<<"$run")" == "$SOURCE_TAG" ]] || { echo "source run was not dispatched from source tag." >&2; exit 1; }
+      - name: Download signed source candidates
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          ARTIFACT_DOWNLOAD_TOKEN: ${{ secrets.SOURCE_ARTIFACT_DOWNLOAD_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ -n "$ARTIFACT_DOWNLOAD_TOKEN" ]] || { echo "SOURCE_ARTIFACT_DOWNLOAD_TOKEN is required." >&2; exit 1; }
+          artifact_id="$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $ARTIFACT_DOWNLOAD_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/Jia-Ethan/keysmith-switch/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100" |
+            jq -er --arg name "keysmith-switch-release-${{ inputs.channel }}" \
+              '[.artifacts[] | select(.name == $name and (.expired | not))] | if length == 1 then .[0].id else error("expected one release artifact") end')"
+          curl --fail --location --silent --show-error \
+            -H "Authorization: Bearer $ARTIFACT_DOWNLOAD_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            -o candidate.zip \
+            "https://api.github.com/repos/Jia-Ethan/keysmith-switch/actions/artifacts/$artifact_id/zip"
+          unzip -q candidate.zip -d candidate
+      - name: Validate immutable candidate
+        env:
+          SOURCE_TAG: ${{ inputs.source_tag }}
           TAURI_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBLIC_KEY }}
         run: |
           set -euo pipefail
-          for name in TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD TAURI_UPDATER_PUBLIC_KEY; do
-            [[ -n "${!name:-}" ]] || { echo "$name is required." >&2; exit 1; }
-          done
-          tmp="$(mktemp -d)"
-          chmod 700 "$tmp"
-          trap 'rm -rf "$tmp"' EXIT
-          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" > "$tmp/updater.key"
-          chmod 600 "$tmp/updater.key"
-          printf 'Keysmith Switch updater publisher key check\n' > "$tmp/artifact.bin"
-          env -u TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" \
-            npx --prefix source tauri signer sign --private-key-path "$tmp/updater.key" "$tmp/artifact.bin" >/dev/null
-          printf '%s' "$TAURI_UPDATER_PUBLIC_KEY" > "$tmp/updater.pub"
-          cargo run --quiet --manifest-path source/src-tauri/Cargo.toml --example verify_updater -- \
-            "$tmp/updater.pub" "$tmp/artifact.bin" "$tmp/artifact.bin.sig"
-      - name: Build updater bundles
-        working-directory: source
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          KEYSMITH_SWITCH_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBLIC_KEY }}
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import json, os, pathlib
-          pubkey = os.environ["KEYSMITH_SWITCH_UPDATER_PUBKEY"].strip()
-          path = pathlib.Path(os.environ["RUNNER_TEMP"], "keysmith-updater-linux.json")
-          path.write_text(json.dumps({
-              "bundle": {"targets": ["deb"], "createUpdaterArtifacts": True},
-              "plugins": {"updater": {"pubkey": pubkey}},
-          }), encoding="utf-8")
-          PY
-          npx tauri build --bundles deb --config "$RUNNER_TEMP/keysmith-updater-linux.json"
-      - name: Verify updater bundles
-        working-directory: source
-        env:
-          TAURI_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBLIC_KEY }}
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          artifacts=(src-tauri/target/release/bundle/deb/*.deb)
-          [[ ${#artifacts[@]} -eq 1 ]] || { echo "Expected one Linux updater artifact, found ${#artifacts[@]}" >&2; exit 1; }
-          artifact="${artifacts[0]}"
-          test -s "$artifact.sig"
-          printf '%s' "$TAURI_UPDATER_PUBLIC_KEY" > "$RUNNER_TEMP/updater.pub"
-          cargo run --quiet --manifest-path src-tauri/Cargo.toml --example verify_updater -- \
-            "$RUNNER_TEMP/updater.pub" "$artifact" "$artifact.sig"
-          mkdir -p ../candidate
-          cp "$artifact" "$artifact.sig" ../candidate/
-      - name: Generate updater metadata
-        working-directory: source
-        env:
-          CHANNEL: ${{ inputs.channel }}
-        run: |
-          set -euo pipefail
-          version="$(node -p 'require("./package.json").version')"
-          tag="v$version"
-          if [[ "$CHANNEL" == beta && "$version" != *-* ]]; then
-            echo "Beta releases require a prerelease source version." >&2
-            exit 1
-          fi
-          if [[ "$CHANNEL" == stable && "$version" == *-* ]]; then
-            echo "Stable releases require a non-prerelease source version." >&2
-            exit 1
-          fi
-          artifact="$(find ../candidate -maxdepth 1 -type f -name '*.deb' -print -quit)"
-          python3 scripts/generate-latest-json.py \
-            --version "$version" \
-            --base-url "https://github.com/Jia-Ethan/keysmith-switch-releases/releases/download/$tag" \
-            --linux-x86_64 "$artifact" \
-            --out ../candidate/latest.json
-      - name: Validate candidate payload
-        env:
-          CHANNEL: ${{ inputs.channel }}
-        run: |
-          set -euo pipefail
+          [[ -n "$TAURI_UPDATER_PUBLIC_KEY" ]] || { echo "TAURI_UPDATER_PUBLIC_KEY is required." >&2; exit 1; }
           test -s candidate/latest.json
+          test -s candidate/SHA256SUMS.txt
           version="$(jq -er .version candidate/latest.json)"
-          tag="v$version"
-          jq -e --arg tag "$tag" '
-            .platforms | length == 1 and
-            .["linux-x86_64"] as $platform and
-            ($platform.url | startswith("https://github.com/Jia-Ethan/keysmith-switch-releases/releases/download/" + $tag + "/")) and
-            ($platform.signature | type == "string" and length > 0) and
-            ($platform.sha256 | test("^[0-9a-f]{64}$"))
+          [[ "v$version" == "$SOURCE_TAG" ]] || { echo "Candidate version does not match source_tag." >&2; exit 1; }
+          mapfile -t payloads < <(find candidate -maxdepth 1 -type f \( -name '*.app.tar.gz' -o -name '*.exe' \) -print | sort)
+          [[ ${#payloads[@]} -eq 2 ]] || { echo "Expected exactly two supported updater payloads." >&2; exit 1; }
+          mapfile -t signatures < <(find candidate -maxdepth 1 -type f \( -name '*.app.tar.gz.sig' -o -name '*.exe.sig' \) -print | sort)
+          [[ ${#signatures[@]} -eq 2 ]] || { echo "Expected exactly two supported updater signatures." >&2; exit 1; }
+          jq -e --arg tag "$SOURCE_TAG" '
+            (.platforms | keys | sort) == ["darwin-aarch64", "windows-x86_64"] and
+            all(.platforms[];
+              (.url | startswith("https://github.com/Jia-Ethan/keysmith-switch-releases/releases/download/" + $tag + "/")) and
+              (.signature | type == "string" and length > 0) and
+              (.sha256 | test("^[0-9a-f]{64}$")))
           ' candidate/latest.json >/dev/null
-          (cd candidate && sha256sum latest.json *.deb *.deb.sig > SHA256SUMS.txt)
-          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          (cd candidate && sha256sum -c SHA256SUMS.txt)
+          printf '%s' "$TAURI_UPDATER_PUBLIC_KEY" > updater.pub
+          cargo run --quiet --manifest-path source/src-tauri/Cargo.toml --example verify_updater -- \
+            updater.pub "$(find candidate -maxdepth 1 -type f -name '*.app.tar.gz' -print -quit)" \
+            "$(find candidate -maxdepth 1 -type f -name '*.app.tar.gz.sig' -print -quit)"
+          cargo run --quiet --manifest-path source/src-tauri/Cargo.toml --example verify_updater -- \
+            updater.pub "$(find candidate -maxdepth 1 -type f -name '*.exe' -print -quit)" \
+            "$(find candidate -maxdepth 1 -type f -name '*.exe.sig' -print -quit)"
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          from urllib.parse import quote
+
+          root = Path("candidate")
+          manifest = json.loads((root / "latest.json").read_text(encoding="utf-8"))
+          expected = {
+              "darwin-aarch64": next(root.glob("*.app.tar.gz")),
+              "windows-x86_64": next(root.glob("*.exe")),
+          }
+          tag = os.environ["SOURCE_TAG"]
+          for platform, artifact in expected.items():
+              entry = manifest["platforms"][platform]
+              expected_url = (
+                  "https://github.com/Jia-Ethan/keysmith-switch-releases/releases/download/"
+                  f"{tag}/{quote(artifact.name, safe='')}"
+              )
+              if entry["url"] != expected_url:
+                  raise SystemExit(f"unexpected {platform} URL")
+              signature = Path(f"{artifact}.sig").read_text(encoding="utf-8").strip()
+              if entry["signature"] != signature:
+                  raise SystemExit(f"unexpected {platform} signature")
+              digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+              if entry["sha256"] != digest:
+                  raise SystemExit(f"unexpected {platform} SHA-256")
+          PY
+      - name: Upload verified publication payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-updater-${{ inputs.channel }}
+          if-no-files-found: error
+          retention-days: 1
+          path: candidate/
+      - name: Remove temporary credentials
+        if: always()
+        run: rm -f ~/.ssh/source-repository ~/.ssh/known_hosts candidate.zip updater.pub
+
+  publish:
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified publication payload
+        uses: actions/download-artifact@v4
+        with:
+          name: verified-updater-${{ inputs.channel }}
+          path: candidate
+      - name: Refuse mutable release targets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_TAG: ${{ inputs.source_tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$SOURCE_TAG" >/dev/null 2>&1 || \
+             gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$SOURCE_TAG" >/dev/null 2>&1; then
+            echo "Release tag already exists; refusing to overwrite immutable updater assets." >&2
+            exit 1
+          fi
       - name: Publish immutable release
         env:
           GH_TOKEN: ${{ github.token }}
+          SOURCE_TAG: ${{ inputs.source_tag }}
           RELEASE_TITLE: ${{ inputs.title }}
           RELEASE_NOTES: ${{ inputs.notes }}
           CHANNEL: ${{ inputs.channel }}
         run: |
           set -euo pipefail
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "Release tag already exists; refusing to overwrite immutable updater assets." >&2
-            exit 1
-          fi
           args=(--title "$RELEASE_TITLE" --notes "$RELEASE_NOTES")
           if [[ "$CHANNEL" == beta ]]; then args+=(--prerelease --latest=false); else args+=(--latest); fi
-          gh release create "$RELEASE_TAG" candidate/* "${args[@]}"
+          gh release create "$SOURCE_TAG" candidate/* "${args[@]}"
       - name: Update beta manifest pointer
         if: inputs.channel == 'beta'
         env:
@@ -208,24 +242,23 @@ jobs:
         run: |
           set -euo pipefail
           content="$(base64 -w 0 candidate/latest.json)"
-          existing="$(gh api repos/${GITHUB_REPOSITORY}/contents/latest.json?ref=beta --jq .sha 2>/dev/null || true)"
-          payload=(repos/${GITHUB_REPOSITORY}/contents/latest.json -f message="chore: update beta manifest" -f branch=beta -f content="$content")
+          existing="$(gh api "repos/${GITHUB_REPOSITORY}/contents/latest.json?ref=beta" --jq .sha 2>/dev/null || true)"
+          payload=("repos/${GITHUB_REPOSITORY}/contents/latest.json" -f message="chore: update beta manifest" -f branch=beta -f content="$content")
           if [[ -n "$existing" ]]; then payload+=(-f sha="$existing"); fi
           gh api -X PUT "${payload[@]}" >/dev/null
       - name: Verify public downloads
         env:
           GH_TOKEN: ${{ github.token }}
+          SOURCE_TAG: ${{ inputs.source_tag }}
           CHANNEL: ${{ inputs.channel }}
         run: |
           set -euo pipefail
           mkdir downloaded
-          gh release download "$RELEASE_TAG" --dir downloaded
+          gh release download "$SOURCE_TAG" --dir downloaded
           (cd downloaded && sha256sum -c SHA256SUMS.txt)
-          public_url="https://github.com/Jia-Ethan/keysmith-switch-releases/releases/download/$RELEASE_TAG/latest.json"
-          if [[ "$CHANNEL" == beta ]]; then public_url="https://raw.githubusercontent.com/Jia-Ethan/keysmith-switch-releases/beta/latest.json"; fi
+          public_url="https://github.com/Jia-Ethan/keysmith-switch-releases/releases/download/$SOURCE_TAG/latest.json"
+          if [[ "$CHANNEL" == beta ]]; then
+            public_url="https://raw.githubusercontent.com/Jia-Ethan/keysmith-switch-releases/beta/latest.json"
+          fi
           curl --fail --location --retry 5 --output /tmp/latest.json "$public_url"
           cmp downloaded/latest.json /tmp/latest.json
-      - name: Remove source deploy key
-        if: always()
-        run: |
-          rm -f ~/.ssh/source-repository ~/.ssh/known_hosts

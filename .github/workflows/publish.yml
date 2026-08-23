@@ -268,7 +268,7 @@ jobs:
           SOURCE_TAG: ${{ inputs.source_tag }}
         run: |
           set -euo pipefail
-          if gh release view "$SOURCE_TAG" >/dev/null 2>&1 || \
+          if gh release view "$SOURCE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
              gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$SOURCE_TAG" >/dev/null 2>&1; then
             echo "Release tag already exists; refusing to overwrite immutable updater assets." >&2
             exit 1
@@ -287,8 +287,15 @@ jobs:
           for asset in "${assets[@]}"; do
             [[ "${asset##*/}" != *' '* ]] || { echo "Release asset filenames must not contain spaces." >&2; exit 1; }
           done
+          published=false
+          cleanup_draft() {
+            if [[ "$published" != true ]]; then
+              gh release delete "$SOURCE_TAG" --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup_draft ERR
           gh release create "$SOURCE_TAG" "${assets[@]}" \
-            --draft --verify-tag --title "$RELEASE_TITLE" --notes "$RELEASE_NOTES" \
+            --draft --title "$RELEASE_TITLE" --notes "$RELEASE_NOTES" \
             --repo "$GITHUB_REPOSITORY"
           mapfile -t uploaded_assets < <(gh release view "$SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | sort)
           mapfile -t expected_assets < <(printf '%s\n' "${assets[@]##*/}" | sort)
@@ -296,6 +303,17 @@ jobs:
             echo "Draft release assets differ from the verified publication set." >&2
             exit 1
           }
+          mkdir draft-download
+          gh release download "$SOURCE_TAG" --dir draft-download --repo "$GITHUB_REPOSITORY"
+          mapfile -t downloaded_assets < <(find draft-download -maxdepth 1 -type f -printf '%f\n' | sort)
+          [[ "$(printf '%s\n' "${downloaded_assets[@]}")" == "$(printf '%s\n' "${expected_assets[@]}")" ]] || {
+            echo "Downloaded draft assets differ from the verified publication set." >&2
+            exit 1
+          }
+          (cd draft-download && sha256sum -c SHA256SUMS.txt)
+          for asset in "${expected_assets[@]}"; do
+            cmp "candidate/$asset" "draft-download/$asset"
+          done
           publish_args=(--draft=false)
           if [[ "$CHANNEL" == beta ]]; then
             publish_args+=(--prerelease --latest=false)
@@ -303,6 +321,8 @@ jobs:
             publish_args+=(--latest)
           fi
           gh release edit "$SOURCE_TAG" "${publish_args[@]}" --repo "$GITHUB_REPOSITORY"
+          published=true
+          trap - ERR
       - name: Update beta manifest pointer
         if: inputs.channel == 'beta'
         env:

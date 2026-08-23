@@ -267,6 +267,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_TAG: ${{ inputs.source_tag }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
         run: |
           set -euo pipefail
           existing_release="$(gh release view "$SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable 2>/dev/null || true)"
@@ -276,6 +277,20 @@ jobs:
               echo "already_published=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
+            mkdir -p draft-preflight
+            gh release download "$SOURCE_TAG" --pattern provenance.json --dir draft-preflight --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || {
+              echo "Existing draft has no verifiable provenance; refusing to remove it." >&2
+              exit 1
+            }
+            jq -e \
+              --arg tag "$SOURCE_TAG" \
+              --arg commit "$SOURCE_COMMIT" \
+              --arg run_id "$SOURCE_RUN_ID" \
+              '.repository == "Jia-Ethan/keysmith-switch" and .source_tag == $tag and .source_commit == $commit and .workflow_run_id == $run_id' \
+              draft-preflight/provenance.json >/dev/null || {
+                echo "Existing draft provenance does not match this publication request; refusing to remove it." >&2
+                exit 1
+              }
             echo "Removing an unfinished draft release for $SOURCE_TAG before retrying."
             gh release delete "$SOURCE_TAG" --cleanup-tag --yes --repo "$GITHUB_REPOSITORY"
           fi
@@ -358,11 +373,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_TAG: ${{ inputs.source_tag }}
+          CHANNEL: ${{ inputs.channel }}
         run: |
           set -euo pipefail
-          state="$(gh release view "$SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable)"
-          [[ "$(jq -r .isDraft <<<"$state")" == false && "$(jq -r .isImmutable <<<"$state")" == true ]] || {
-            echo "Existing release is not a published immutable release." >&2
+          state="$(gh release view "$SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable,isPrerelease)"
+          expected_prerelease=false
+          [[ "$CHANNEL" != beta ]] || expected_prerelease=true
+          [[ "$(jq -r .isDraft <<<"$state")" == false && \
+             "$(jq -r .isImmutable <<<"$state")" == true && \
+             "$(jq -r .isPrerelease <<<"$state")" == "$expected_prerelease" ]] || {
+            echo "Existing release state does not match the requested immutable channel." >&2
             exit 1
           }
           mkdir existing-download

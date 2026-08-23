@@ -150,6 +150,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          target="$(rustc -vV | sed -n 's/^host: //p')"
+          for binary in keysmith-claude keysmith-codex keysmith-grok keysmith-zcode; do
+            install -m 755 /bin/true "source/src-tauri/binaries/${binary}-${target}"
+          done
       - name: Validate immutable candidate
         env:
           SOURCE_TAG: ${{ inputs.source_tag }}

@@ -289,11 +289,15 @@ jobs:
           done
           published=false
           cleanup_draft() {
+            status="${1:-$?}"
             if [[ "$published" != true ]]; then
               gh release delete "$SOURCE_TAG" --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || true
             fi
+            exit "$status"
           }
-          trap cleanup_draft ERR
+          trap 'cleanup_draft $?' EXIT
+          trap 'cleanup_draft 130' INT
+          trap 'cleanup_draft 143' TERM
           gh release create "$SOURCE_TAG" "${assets[@]}" \
             --draft --title "$RELEASE_TITLE" --notes "$RELEASE_NOTES" \
             --repo "$GITHUB_REPOSITORY"
@@ -321,8 +325,13 @@ jobs:
             publish_args+=(--latest)
           fi
           gh release edit "$SOURCE_TAG" "${publish_args[@]}" --repo "$GITHUB_REPOSITORY"
+          expected_prerelease=false
+          [[ "$CHANNEL" != beta ]] || expected_prerelease=true
+          gh release view "$SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable,isPrerelease --jq \
+            --argjson expected_prerelease "$expected_prerelease" \
+            '(.isDraft | not) and .isImmutable and (.isPrerelease == $expected_prerelease)' | grep -qx true
           published=true
-          trap - ERR
+          trap - EXIT INT TERM
       - name: Update beta manifest pointer
         if: inputs.channel == 'beta'
         env:

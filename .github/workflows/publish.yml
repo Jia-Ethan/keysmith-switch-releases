@@ -146,6 +146,10 @@ jobs:
             -o candidate.zip \
             "https://api.github.com/repos/Jia-Ethan/keysmith-switch/actions/artifacts/$artifact_id/zip"
           unzip -q candidate.zip -d candidate
+      - name: Install updater verifier dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - name: Validate immutable candidate
         env:
           SOURCE_TAG: ${{ inputs.source_tag }}

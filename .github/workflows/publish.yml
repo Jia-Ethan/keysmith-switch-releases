@@ -88,6 +88,7 @@ jobs:
           commit="$(git -C source rev-parse "$SOURCE_TAG^{commit}")"
           version="$(git -C source show "$commit:package.json" | jq -er .version)"
           [[ "v$version" == "$SOURCE_TAG" ]] || { echo "source tag and package version differ." >&2; exit 1; }
+          git -C source checkout --detach "$commit"
           echo "SOURCE_COMMIT=$commit" >> "$GITHUB_ENV"
           echo "SOURCE_VERSION=$version" >> "$GITHUB_ENV"
       - name: Verify source workflow provenance

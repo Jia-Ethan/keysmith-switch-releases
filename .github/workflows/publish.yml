@@ -284,7 +284,7 @@ jobs:
           set -euo pipefail
           args=(--title "$RELEASE_TITLE" --notes "$RELEASE_NOTES")
           if [[ "$CHANNEL" == beta ]]; then args+=(--prerelease --latest=false); else args+=(--latest); fi
-          gh release create "$SOURCE_TAG" candidate/* "${args[@]}"
+          gh release create "$SOURCE_TAG" candidate/* "${args[@]}" --repo "$GITHUB_REPOSITORY"
       - name: Update beta manifest pointer
         if: inputs.channel == 'beta'
         env:
@@ -304,7 +304,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir downloaded
-          gh release download "$SOURCE_TAG" --dir downloaded
+          gh release download "$SOURCE_TAG" --dir downloaded --repo "$GITHUB_REPOSITORY"
           (cd downloaded && sha256sum -c SHA256SUMS.txt)
           public_url="https://github.com/Jia-Ethan/keysmith-switch-releases/releases/download/$SOURCE_TAG/latest.json"
           if [[ "$CHANNEL" == beta ]]; then

@@ -263,17 +263,29 @@ jobs:
           name: verified-updater-${{ inputs.channel }}
           path: candidate
       - name: Refuse mutable release targets
+        id: preflight
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_TAG: ${{ inputs.source_tag }}
         run: |
           set -euo pipefail
-          if gh release view "$SOURCE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
-             gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$SOURCE_TAG" >/dev/null 2>&1; then
-            echo "Release tag already exists; refusing to overwrite immutable updater assets." >&2
+          existing_release="$(gh release view "$SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable 2>/dev/null || true)"
+          if [[ -n "$existing_release" ]]; then
+            if [[ "$(jq -r .isDraft <<<"$existing_release")" != true ]]; then
+              echo "A published release already exists for $SOURCE_TAG; resuming publication verification."
+              echo "already_published=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Removing an unfinished draft release for $SOURCE_TAG before retrying."
+            gh release delete "$SOURCE_TAG" --cleanup-tag --yes --repo "$GITHUB_REPOSITORY"
+          fi
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$SOURCE_TAG" >/dev/null 2>&1; then
+            echo "A tag already exists for $SOURCE_TAG; refusing to overwrite it." >&2
             exit 1
           fi
+          echo "already_published=false" >> "$GITHUB_OUTPUT"
       - name: Publish immutable release
+        if: steps.preflight.outputs.already_published != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_TAG: ${{ inputs.source_tag }}
@@ -290,14 +302,18 @@ jobs:
           published=false
           cleanup_draft() {
             status="${1:-$?}"
+            trap - EXIT INT TERM
             if [[ "$published" != true ]]; then
               gh release delete "$SOURCE_TAG" --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || true
             fi
             exit "$status"
           }
-          trap 'cleanup_draft $?' EXIT
-          trap 'cleanup_draft 130' INT
-          trap 'cleanup_draft 143' TERM
+          on_exit() { cleanup_draft "$?"; }
+          on_int() { cleanup_draft 130; }
+          on_term() { cleanup_draft 143; }
+          trap on_exit EXIT
+          trap on_int INT
+          trap on_term TERM
           gh release create "$SOURCE_TAG" "${assets[@]}" \
             --draft --title "$RELEASE_TITLE" --notes "$RELEASE_NOTES" \
             --repo "$GITHUB_REPOSITORY"
@@ -325,13 +341,42 @@ jobs:
             publish_args+=(--latest)
           fi
           gh release edit "$SOURCE_TAG" "${publish_args[@]}" --repo "$GITHUB_REPOSITORY"
+          published=true
           expected_prerelease=false
           [[ "$CHANNEL" != beta ]] || expected_prerelease=true
-          gh release view "$SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable,isPrerelease --jq \
-            --argjson expected_prerelease "$expected_prerelease" \
-            '(.isDraft | not) and .isImmutable and (.isPrerelease == $expected_prerelease)' | grep -qx true
-          published=true
+          release_state="$(gh release view "$SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable,isPrerelease)"
+          RELEASE_STATE="$release_state" EXPECTED_PRERELEASE="$expected_prerelease" python3 - <<'PY'
+          import json, os
+          state = json.loads(os.environ["RELEASE_STATE"])
+          expected = os.environ["EXPECTED_PRERELEASE"] == "true"
+          if state.get("isDraft") or not state.get("isImmutable") or state.get("isPrerelease") != expected:
+              raise SystemExit("published release state does not match the requested immutable channel")
+          PY
           trap - EXIT INT TERM
+      - name: Verify existing immutable release
+        if: steps.preflight.outputs.already_published == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_TAG: ${{ inputs.source_tag }}
+        run: |
+          set -euo pipefail
+          state="$(gh release view "$SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable)"
+          [[ "$(jq -r .isDraft <<<"$state")" == false && "$(jq -r .isImmutable <<<"$state")" == true ]] || {
+            echo "Existing release is not a published immutable release." >&2
+            exit 1
+          }
+          mkdir existing-download
+          gh release download "$SOURCE_TAG" --dir existing-download --repo "$GITHUB_REPOSITORY"
+          mapfile -t existing_assets < <(find existing-download -maxdepth 1 -type f -printf '%f\n' | sort)
+          mapfile -t expected_assets < <(find candidate -maxdepth 1 -type f -printf '%f\n' | sort)
+          [[ "$(printf '%s\n' "${existing_assets[@]}")" == "$(printf '%s\n' "${expected_assets[@]}")" ]] || {
+            echo "Existing release assets differ from the verified candidate." >&2
+            exit 1
+          }
+          (cd existing-download && sha256sum -c SHA256SUMS.txt)
+          for asset in "${expected_assets[@]}"; do
+            cmp "candidate/$asset" "existing-download/$asset"
+          done
       - name: Update beta manifest pointer
         if: inputs.channel == 'beta'
         env:

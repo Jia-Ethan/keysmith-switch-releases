@@ -284,7 +284,9 @@ jobs:
           set -euo pipefail
           args=(--title "$RELEASE_TITLE" --notes "$RELEASE_NOTES")
           if [[ "$CHANNEL" == beta ]]; then args+=(--prerelease --latest=false); else args+=(--latest); fi
-          gh release create "$SOURCE_TAG" candidate/* "${args[@]}" --repo "$GITHUB_REPOSITORY"
+          mapfile -d '' assets < <(find candidate -maxdepth 1 -type f -print0 | sort -z)
+          [[ ${#assets[@]} -eq 8 ]] || { echo "Expected exactly eight publication files." >&2; exit 1; }
+          gh release create "$SOURCE_TAG" "${assets[@]}" "${args[@]}" --repo "$GITHUB_REPOSITORY"
       - name: Update beta manifest pointer
         if: inputs.channel == 'beta'
         env:

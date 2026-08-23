@@ -181,7 +181,7 @@ jobs:
               *) echo "Unexpected publication file: $file" >&2; exit 1 ;;
             esac
           done
-          mapfile -t checksum_names < <(awk 'NF {sub(/^\*/, "", $2); sub(/^\.\//, "", $2); print $2}' candidate/SHA256SUMS.txt | sort)
+          mapfile -t checksum_names < <(sed -E 's/^[0-9a-fA-F]{64} [ *]//; s#^\./##' candidate/SHA256SUMS.txt | sed '/^$/d' | sort)
           mapfile -t expected_checksum_names < <(printf '%s\n' "${files[@]}" | grep -v '^SHA256SUMS.txt$' | sort)
           [[ ${#checksum_names[@]} -eq 7 ]] || { echo "Expected seven checksum entries." >&2; exit 1; }
           [[ "$(printf '%s\n' "${checksum_names[@]}")" == "$(printf '%s\n' "${expected_checksum_names[@]}")" ]] || {

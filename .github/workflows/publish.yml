@@ -282,11 +282,27 @@ jobs:
           CHANNEL: ${{ inputs.channel }}
         run: |
           set -euo pipefail
-          args=(--title "$RELEASE_TITLE" --notes "$RELEASE_NOTES")
-          if [[ "$CHANNEL" == beta ]]; then args+=(--prerelease --latest=false); else args+=(--latest); fi
           mapfile -d '' assets < <(find candidate -maxdepth 1 -type f -print0 | sort -z)
           [[ ${#assets[@]} -eq 8 ]] || { echo "Expected exactly eight publication files." >&2; exit 1; }
-          gh release create "$SOURCE_TAG" "${assets[@]}" "${args[@]}" --repo "$GITHUB_REPOSITORY"
+          for asset in "${assets[@]}"; do
+            [[ "${asset##*/}" != *' '* ]] || { echo "Release asset filenames must not contain spaces." >&2; exit 1; }
+          done
+          gh release create "$SOURCE_TAG" "${assets[@]}" \
+            --draft --verify-tag --title "$RELEASE_TITLE" --notes "$RELEASE_NOTES" \
+            --repo "$GITHUB_REPOSITORY"
+          mapfile -t uploaded_assets < <(gh release view "$SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | sort)
+          mapfile -t expected_assets < <(printf '%s\n' "${assets[@]##*/}" | sort)
+          [[ "$(printf '%s\n' "${uploaded_assets[@]}")" == "$(printf '%s\n' "${expected_assets[@]}")" ]] || {
+            echo "Draft release assets differ from the verified publication set." >&2
+            exit 1
+          }
+          publish_args=(--draft=false)
+          if [[ "$CHANNEL" == beta ]]; then
+            publish_args+=(--prerelease --latest=false)
+          else
+            publish_args+=(--latest)
+          fi
+          gh release edit "$SOURCE_TAG" "${publish_args[@]}" --repo "$GITHUB_REPOSITORY"
       - name: Update beta manifest pointer
         if: inputs.channel == 'beta'
         env:

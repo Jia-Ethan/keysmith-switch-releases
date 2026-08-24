@@ -198,11 +198,15 @@ jobs:
             exit 1
           }
           jq -e --arg tag "$SOURCE_TAG" '
+            (.minimum_updater_version | type == "string") and
+            (.minimum_updater_version | test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$")) and
+            .minimum_updater_version == "0.1.3" and
             (.platforms | keys | sort) == ["darwin-aarch64", "windows-x86_64"] and
             all(.platforms[];
               (.url | startswith("https://github.com/Jia-Ethan/keysmith-switch-releases/releases/download/" + $tag + "/")) and
               (.signature | type == "string" and length > 0) and
-              (.sha256 | test("^[0-9a-f]{64}$")))
+              (.sha256 | test("^[0-9a-f]{64}$")) and
+              (.size | type == "number" and . > 0 and floor == .))
           ' candidate/latest.json >/dev/null
           (cd candidate && sha256sum -c SHA256SUMS.txt)
           printf '%s' "$TAURI_UPDATER_PUBLIC_KEY" > updater.pub
@@ -213,12 +217,23 @@ jobs:
             updater.pub "$(find candidate -maxdepth 1 -type f -name '*.exe' -print -quit)" \
             "$(find candidate -maxdepth 1 -type f -name '*.exe.sig' -print -quit)"
           python3 - <<'PY'
-          import hashlib, json, os
+          import hashlib, json, os, re
           from pathlib import Path
           from urllib.parse import quote
 
           root = Path("candidate")
           manifest = json.loads((root / "latest.json").read_text(encoding="utf-8"))
+          minimum_version = manifest.get("minimum_updater_version")
+          semver = re.compile(
+              r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+              r"(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+              r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?"
+              r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+          )
+          if not isinstance(minimum_version, str) or not semver.fullmatch(minimum_version):
+              raise SystemExit("minimum_updater_version must be a complete semantic version")
+          if minimum_version != "0.1.3":
+              raise SystemExit("minimum_updater_version must be 0.1.3")
           expected = {
               "darwin-aarch64": next(root.glob("*.app.tar.gz")),
               "windows-x86_64": next(root.glob("*.exe")),
@@ -238,6 +253,11 @@ jobs:
               digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
               if entry["sha256"] != digest:
                   raise SystemExit(f"unexpected {platform} SHA-256")
+              size = entry.get("size")
+              if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+                  raise SystemExit(f"invalid {platform} size")
+              if size != artifact.stat().st_size:
+                  raise SystemExit(f"unexpected {platform} size")
           PY
       - name: Upload verified publication payload
         uses: actions/upload-artifact@v4
@@ -417,7 +437,16 @@ jobs:
           set -euo pipefail
           mkdir downloaded
           gh release download "$SOURCE_TAG" --dir downloaded --repo "$GITHUB_REPOSITORY"
+          mapfile -t downloaded_assets < <(find downloaded -maxdepth 1 -type f -printf '%f\n' | sort)
+          mapfile -t expected_assets < <(find candidate -maxdepth 1 -type f -printf '%f\n' | sort)
+          [[ "$(printf '%s\n' "${downloaded_assets[@]}")" == "$(printf '%s\n' "${expected_assets[@]}")" ]] || {
+            echo "Public release assets differ from the verified candidate." >&2
+            exit 1
+          }
           (cd downloaded && sha256sum -c SHA256SUMS.txt)
+          for asset in "${expected_assets[@]}"; do
+            cmp "candidate/$asset" "downloaded/$asset"
+          done
           public_url="https://github.com/Jia-Ethan/keysmith-switch-releases/releases/download/$SOURCE_TAG/latest.json"
           if [[ "$CHANNEL" == beta ]]; then
             public_url="https://raw.githubusercontent.com/Jia-Ethan/keysmith-switch-releases/beta/latest.json"

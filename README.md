@@ -4,7 +4,7 @@ Public updater artifacts for [Keysmith Switch](https://github.com/Jia-Ethan/keys
 
 This repository contains generated release metadata, updater-signed payloads, and the manual bootstrap installer. Source code remains in the public product repository; production updater signing keys remain only in protected secret storage.
 
-The public workflow accepts a signed source tag and a successful source release run, independently verifies the supported-platform manifest, updater signatures, provenance and checksums, and publishes only through the protected `production` environment. Linux validation artifacts never enter the public updater feed.
+The public workflow accepts a signed source tag and a successful source release run, independently verifies the supported-platform manifest, updater signatures, provenance and checksums, and publishes only through the protected `production` environment. The manifest records `minimum_updater_version` and the exact byte size of every updater payload; publication fails if either the compatibility floor or an artifact size is invalid. Linux validation artifacts never enter the public updater feed.
 
 Stable `v0.1.3` is published as the production updater-key bootstrap. Existing `v0.1.1` installs must download it manually; later releases can use in-app updates from `v0.1.3` onward. Platform code signing is not part of this distribution model; updater payloads remain protected by the production Tauri minisign key.
 

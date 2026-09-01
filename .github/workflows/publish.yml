@@ -1,0 +1,455 @@
+name: publish-updater-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: Signed keysmith-switch tag (vX.Y.Z or vX.Y.Z-prerelease)
+        required: true
+        type: string
+      channel:
+        description: Release channel
+        required: true
+        type: choice
+        options: [stable, beta]
+      source_run_id:
+        description: Successful private release workflow run containing signed candidates
+        required: true
+        type: string
+      title:
+        description: Release title
+        required: true
+        type: string
+      notes:
+        description: Public release notes
+        required: false
+        default: ""
+        type: string
+      confirmation:
+        description: Enter the exact source tag again to authorize publication
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: updater-${{ inputs.channel }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate publication request
+        env:
+          SOURCE_TAG: ${{ inputs.source_tag }}
+          CHANNEL: ${{ inputs.channel }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || {
+            echo "source_tag must be a complete semantic-version tag." >&2
+            exit 1
+          }
+          [[ "$CHANNEL" == stable || "$CHANNEL" == beta ]] || { echo "Unexpected channel." >&2; exit 1; }
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]] || { echo "source_run_id must be numeric." >&2; exit 1; }
+          [[ "$CONFIRMATION" == "$SOURCE_TAG" ]] || { echo "confirmation must exactly match source_tag." >&2; exit 1; }
+          if [[ "$CHANNEL" == beta && "$SOURCE_TAG" != *-* ]]; then
+            echo "Beta releases require a prerelease tag." >&2
+            exit 1
+          fi
+          if [[ "$CHANNEL" == stable && "$SOURCE_TAG" == *-* ]]; then
+            echo "Stable releases require a non-prerelease tag." >&2
+            exit 1
+          fi
+      - name: Configure read-only source access
+        env:
+          SOURCE_REPOSITORY_DEPLOY_KEY_B64: ${{ secrets.SOURCE_REPOSITORY_DEPLOY_KEY_B64 }}
+        run: |
+          set -euo pipefail
+          [[ -n "$SOURCE_REPOSITORY_DEPLOY_KEY_B64" ]] || { echo "SOURCE_REPOSITORY_DEPLOY_KEY_B64 is required." >&2; exit 1; }
+          install -d -m 700 ~/.ssh
+          printf '%s' "$SOURCE_REPOSITORY_DEPLOY_KEY_B64" | base64 --decode > ~/.ssh/source-repository
+          chmod 600 ~/.ssh/source-repository
+          ssh-keyscan github.com > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          echo 'GIT_SSH_COMMAND=ssh -i ~/.ssh/source-repository -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes' >> "$GITHUB_ENV"
+      - name: Verify signed source tag
+        env:
+          SOURCE_TAG: ${{ inputs.source_tag }}
+        run: |
+          set -euo pipefail
+          git init source
+          git -C source remote add origin git@github.com:Jia-Ethan/keysmith-switch.git
+          git -C source fetch --depth=1 origin "refs/tags/$SOURCE_TAG:refs/tags/$SOURCE_TAG"
+          [[ "$(git -C source cat-file -t "$SOURCE_TAG")" == tag ]] || { echo "source_tag must be annotated." >&2; exit 1; }
+          commit="$(git -C source rev-parse "$SOURCE_TAG^{commit}")"
+          version="$(git -C source show "$commit:package.json" | jq -er .version)"
+          [[ "v$version" == "$SOURCE_TAG" ]] || { echo "source tag and package version differ." >&2; exit 1; }
+          git -C source checkout --detach "$commit"
+          echo "SOURCE_COMMIT=$commit" >> "$GITHUB_ENV"
+          echo "SOURCE_VERSION=$version" >> "$GITHUB_ENV"
+      - name: Verify source workflow provenance
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_TAG: ${{ inputs.source_tag }}
+          ARTIFACT_DOWNLOAD_TOKEN: ${{ secrets.SOURCE_ARTIFACT_DOWNLOAD_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ -n "$ARTIFACT_DOWNLOAD_TOKEN" ]] || { echo "SOURCE_ARTIFACT_DOWNLOAD_TOKEN is required." >&2; exit 1; }
+          run="$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $ARTIFACT_DOWNLOAD_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/Jia-Ethan/keysmith-switch/actions/runs/$SOURCE_RUN_ID")"
+          [[ "$(jq -r .head_repository.full_name <<<"$run")" == "Jia-Ethan/keysmith-switch" ]] || { echo "source run repository mismatch." >&2; exit 1; }
+          [[ "$(jq -r .name <<<"$run")" == release ]] || { echo "source_run_id is not the release workflow." >&2; exit 1; }
+          [[ "$(jq -r .path <<<"$run")" == ".github/workflows/release.yml" ]] || { echo "source_run_id has an unexpected workflow path." >&2; exit 1; }
+          [[ "$(jq -r .event <<<"$run")" == workflow_dispatch ]] || { echo "source run was not manually dispatched." >&2; exit 1; }
+          [[ "$(jq -r .head_sha <<<"$run")" == "$SOURCE_COMMIT" ]] || { echo "source run commit does not match the verified tag." >&2; exit 1; }
+          [[ "$(jq -r .status <<<"$run")" == completed && "$(jq -r .conclusion <<<"$run")" == success ]] || {
+            echo "source release workflow did not complete successfully." >&2
+            exit 1
+          }
+          tag_object="$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $ARTIFACT_DOWNLOAD_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/Jia-Ethan/keysmith-switch/git/ref/tags/$SOURCE_TAG" | jq -er .object.sha)"
+          tag="$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $ARTIFACT_DOWNLOAD_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/Jia-Ethan/keysmith-switch/git/tags/$tag_object")"
+          [[ "$(jq -r .verification.verified <<<"$tag")" == true ]] || { echo "source_tag must have a GitHub-verified signature." >&2; exit 1; }
+          [[ "$(jq -r .object.sha <<<"$tag")" == "$SOURCE_COMMIT" ]] || { echo "verified tag commit mismatch." >&2; exit 1; }
+      - name: Download signed source candidates
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          ARTIFACT_DOWNLOAD_TOKEN: ${{ secrets.SOURCE_ARTIFACT_DOWNLOAD_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ -n "$ARTIFACT_DOWNLOAD_TOKEN" ]] || { echo "SOURCE_ARTIFACT_DOWNLOAD_TOKEN is required." >&2; exit 1; }
+          artifact_id="$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $ARTIFACT_DOWNLOAD_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/Jia-Ethan/keysmith-switch/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100" |
+            jq -er --arg name "keysmith-switch-release-${{ inputs.channel }}" \
+              '[.artifacts[] | select(.name == $name and (.expired | not))] | if length == 1 then .[0].id else error("expected one release artifact") end')"
+          curl --fail --location --silent --show-error \
+            -H "Authorization: Bearer $ARTIFACT_DOWNLOAD_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            -o candidate.zip \
+            "https://api.github.com/repos/Jia-Ethan/keysmith-switch/actions/artifacts/$artifact_id/zip"
+          unzip -q candidate.zip -d candidate
+      - name: Install updater verifier dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          target="$(rustc -vV | sed -n 's/^host: //p')"
+          for binary in keysmith-claude keysmith-codex keysmith-grok keysmith-zcode; do
+            install -m 755 /bin/true "source/src-tauri/binaries/${binary}-${target}"
+          done
+      - name: Validate immutable candidate
+        env:
+          SOURCE_TAG: ${{ inputs.source_tag }}
+          TAURI_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          [[ -n "$TAURI_UPDATER_PUBLIC_KEY" ]] || { echo "TAURI_UPDATER_PUBLIC_KEY is required." >&2; exit 1; }
+          test -s candidate/latest.json
+          test -s candidate/provenance.json
+          test -s candidate/SHA256SUMS.txt
+          jq -e \
+            --arg tag "$SOURCE_TAG" \
+            --arg commit "$SOURCE_COMMIT" \
+            --arg run_id "${{ inputs.source_run_id }}" \
+            '.repository == "Jia-Ethan/keysmith-switch" and .source_tag == $tag and .source_commit == $commit and .workflow_run_id == $run_id' \
+            candidate/provenance.json >/dev/null
+          version="$(jq -er .version candidate/latest.json)"
+          [[ "v$version" == "$SOURCE_TAG" ]] || { echo "Candidate version does not match source_tag." >&2; exit 1; }
+          mapfile -t dmgs < <(find candidate -maxdepth 1 -type f -name '*.dmg' -print | sort)
+          [[ ${#dmgs[@]} -eq 1 ]] || { echo "Expected exactly one macOS DMG." >&2; exit 1; }
+          mapfile -t payloads < <(find candidate -maxdepth 1 -type f \( -name '*.app.tar.gz' -o -name '*.exe' \) -print | sort)
+          [[ ${#payloads[@]} -eq 2 ]] || { echo "Expected exactly two supported updater payloads." >&2; exit 1; }
+          mapfile -t signatures < <(find candidate -maxdepth 1 -type f \( -name '*.app.tar.gz.sig' -o -name '*.exe.sig' \) -print | sort)
+          [[ ${#signatures[@]} -eq 2 ]] || { echo "Expected exactly two supported updater signatures." >&2; exit 1; }
+          mapfile -t files < <(find candidate -maxdepth 1 -type f -printf '%f\n' | sort)
+          [[ ${#files[@]} -eq 8 ]] || { echo "Expected exactly eight publication files." >&2; printf '%s\n' "${files[@]}" >&2; exit 1; }
+          [[ -z "$(find candidate -mindepth 2 -print -quit)" ]] || { echo "Nested publication paths are not allowed." >&2; exit 1; }
+          for required in latest.json provenance.json SHA256SUMS.txt; do
+            [[ -f "candidate/$required" ]] || { echo "Missing required file: $required" >&2; exit 1; }
+          done
+          for file in "${files[@]}"; do
+            case "$file" in
+              latest.json|provenance.json|SHA256SUMS.txt|*.dmg|*.app.tar.gz|*.app.tar.gz.sig|*.exe|*.exe.sig) ;;
+              *) echo "Unexpected publication file: $file" >&2; exit 1 ;;
+            esac
+          done
+          mapfile -t checksum_names < <(sed -E 's/^[0-9a-fA-F]{64} [ *]//; s#^\./##' candidate/SHA256SUMS.txt | sed '/^$/d' | sort)
+          mapfile -t expected_checksum_names < <(printf '%s\n' "${files[@]}" | grep -v '^SHA256SUMS.txt$' | sort)
+          [[ ${#checksum_names[@]} -eq 7 ]] || { echo "Expected seven checksum entries." >&2; exit 1; }
+          [[ "$(printf '%s\n' "${checksum_names[@]}")" == "$(printf '%s\n' "${expected_checksum_names[@]}")" ]] || {
+            echo "SHA256SUMS.txt does not cover the exact publication file set." >&2
+            exit 1
+          }
+          jq -e --arg tag "$SOURCE_TAG" '
+            (.minimum_updater_version | type == "string") and
+            (.minimum_updater_version | test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$")) and
+            .minimum_updater_version == "0.1.3" and
+            (.platforms | keys | sort) == ["darwin-aarch64", "windows-x86_64"] and
+            all(.platforms[];
+              (.url | startswith("https://github.com/Jia-Ethan/keysmith-switch-releases/releases/download/" + $tag + "/")) and
+              (.signature | type == "string" and length > 0) and
+              (.sha256 | test("^[0-9a-f]{64}$")) and
+              (.size | type == "number" and . > 0 and floor == .))
+          ' candidate/latest.json >/dev/null
+          (cd candidate && sha256sum -c SHA256SUMS.txt)
+          printf '%s' "$TAURI_UPDATER_PUBLIC_KEY" > updater.pub
+          cargo run --quiet --manifest-path source/src-tauri/Cargo.toml --example verify_updater -- \
+            updater.pub "$(find candidate -maxdepth 1 -type f -name '*.app.tar.gz' -print -quit)" \
+            "$(find candidate -maxdepth 1 -type f -name '*.app.tar.gz.sig' -print -quit)"
+          cargo run --quiet --manifest-path source/src-tauri/Cargo.toml --example verify_updater -- \
+            updater.pub "$(find candidate -maxdepth 1 -type f -name '*.exe' -print -quit)" \
+            "$(find candidate -maxdepth 1 -type f -name '*.exe.sig' -print -quit)"
+          python3 - <<'PY'
+          import hashlib, json, os, re
+          from pathlib import Path
+          from urllib.parse import quote
+
+          root = Path("candidate")
+          manifest = json.loads((root / "latest.json").read_text(encoding="utf-8"))
+          minimum_version = manifest.get("minimum_updater_version")
+          semver = re.compile(
+              r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+              r"(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+              r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?"
+              r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+          )
+          if not isinstance(minimum_version, str) or not semver.fullmatch(minimum_version):
+              raise SystemExit("minimum_updater_version must be a complete semantic version")
+          if minimum_version != "0.1.3":
+              raise SystemExit("minimum_updater_version must be 0.1.3")
+          expected = {
+              "darwin-aarch64": next(root.glob("*.app.tar.gz")),
+              "windows-x86_64": next(root.glob("*.exe")),
+          }
+          tag = os.environ["SOURCE_TAG"]
+          for platform, artifact in expected.items():
+              entry = manifest["platforms"][platform]
+              expected_url = (
+                  "https://github.com/Jia-Ethan/keysmith-switch-releases/releases/download/"
+                  f"{tag}/{quote(artifact.name, safe='')}"
+              )
+              if entry["url"] != expected_url:
+                  raise SystemExit(f"unexpected {platform} URL")
+              signature = Path(f"{artifact}.sig").read_text(encoding="utf-8").strip()
+              if entry["signature"] != signature:
+                  raise SystemExit(f"unexpected {platform} signature")
+              digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+              if entry["sha256"] != digest:
+                  raise SystemExit(f"unexpected {platform} SHA-256")
+              size = entry.get("size")
+              if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+                  raise SystemExit(f"invalid {platform} size")
+              if size != artifact.stat().st_size:
+                  raise SystemExit(f"unexpected {platform} size")
+          PY
+      - name: Upload verified publication payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-updater-${{ inputs.channel }}
+          if-no-files-found: error
+          retention-days: 1
+          path: candidate/
+      - name: Remove temporary credentials
+        if: always()
+        run: rm -f ~/.ssh/source-repository ~/.ssh/known_hosts candidate.zip updater.pub
+
+  publish:
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified publication payload
+        uses: actions/download-artifact@v4
+        with:
+          name: verified-updater-${{ inputs.channel }}
+          path: candidate
+      - name: Refuse mutable release targets
+        id: preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_TAG: ${{ inputs.source_tag }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          set -euo pipefail
+          existing_release="$(gh release view "$SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable 2>/dev/null || true)"
+          if [[ -n "$existing_release" ]]; then
+            if [[ "$(jq -r .isDraft <<<"$existing_release")" != true ]]; then
+              echo "A published release already exists for $SOURCE_TAG; resuming publication verification."
+              echo "already_published=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            mkdir -p draft-preflight
+            gh release download "$SOURCE_TAG" --pattern provenance.json --dir draft-preflight --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || {
+              echo "Existing draft has no verifiable provenance; refusing to remove it." >&2
+              exit 1
+            }
+            jq -e \
+              --arg tag "$SOURCE_TAG" \
+              --arg commit "$SOURCE_COMMIT" \
+              --arg run_id "$SOURCE_RUN_ID" \
+              '.repository == "Jia-Ethan/keysmith-switch" and .source_tag == $tag and .source_commit == $commit and .workflow_run_id == $run_id' \
+              draft-preflight/provenance.json >/dev/null || {
+                echo "Existing draft provenance does not match this publication request; refusing to remove it." >&2
+                exit 1
+              }
+            echo "Removing an unfinished draft release for $SOURCE_TAG before retrying."
+            gh release delete "$SOURCE_TAG" --cleanup-tag --yes --repo "$GITHUB_REPOSITORY"
+          fi
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$SOURCE_TAG" >/dev/null 2>&1; then
+            echo "A tag already exists for $SOURCE_TAG; refusing to overwrite it." >&2
+            exit 1
+          fi
+          echo "already_published=false" >> "$GITHUB_OUTPUT"
+      - name: Publish immutable release
+        if: steps.preflight.outputs.already_published != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_TAG: ${{ inputs.source_tag }}
+          RELEASE_TITLE: ${{ inputs.title }}
+          RELEASE_NOTES: ${{ inputs.notes }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          mapfile -d '' assets < <(find candidate -maxdepth 1 -type f -print0 | sort -z)
+          [[ ${#assets[@]} -eq 8 ]] || { echo "Expected exactly eight publication files." >&2; exit 1; }
+          for asset in "${assets[@]}"; do
+            [[ "${asset##*/}" != *' '* ]] || { echo "Release asset filenames must not contain spaces." >&2; exit 1; }
+          done
+          published=false
+          cleanup_draft() {
+            status="${1:-$?}"
+            trap - EXIT INT TERM
+            if [[ "$published" != true ]]; then
+              gh release delete "$SOURCE_TAG" --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || true
+            fi
+            exit "$status"
+          }
+          on_exit() { cleanup_draft "$?"; }
+          on_int() { cleanup_draft 130; }
+          on_term() { cleanup_draft 143; }
+          trap on_exit EXIT
+          trap on_int INT
+          trap on_term TERM
+          gh release create "$SOURCE_TAG" "${assets[@]}" \
+            --draft --title "$RELEASE_TITLE" --notes "$RELEASE_NOTES" \
+            --repo "$GITHUB_REPOSITORY"
+          mapfile -t uploaded_assets < <(gh release view "$SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | sort)
+          mapfile -t expected_assets < <(printf '%s\n' "${assets[@]##*/}" | sort)
+          [[ "$(printf '%s\n' "${uploaded_assets[@]}")" == "$(printf '%s\n' "${expected_assets[@]}")" ]] || {
+            echo "Draft release assets differ from the verified publication set." >&2
+            exit 1
+          }
+          mkdir draft-download
+          gh release download "$SOURCE_TAG" --dir draft-download --repo "$GITHUB_REPOSITORY"
+          mapfile -t downloaded_assets < <(find draft-download -maxdepth 1 -type f -printf '%f\n' | sort)
+          [[ "$(printf '%s\n' "${downloaded_assets[@]}")" == "$(printf '%s\n' "${expected_assets[@]}")" ]] || {
+            echo "Downloaded draft assets differ from the verified publication set." >&2
+            exit 1
+          }
+          (cd draft-download && sha256sum -c SHA256SUMS.txt)
+          for asset in "${expected_assets[@]}"; do
+            cmp "candidate/$asset" "draft-download/$asset"
+          done
+          publish_args=(--draft=false)
+          if [[ "$CHANNEL" == beta ]]; then
+            publish_args+=(--prerelease --latest=false)
+          else
+            publish_args+=(--latest)
+          fi
+          gh release edit "$SOURCE_TAG" "${publish_args[@]}" --repo "$GITHUB_REPOSITORY"
+          published=true
+          expected_prerelease=false
+          [[ "$CHANNEL" != beta ]] || expected_prerelease=true
+          release_state="$(gh release view "$SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable,isPrerelease)"
+          RELEASE_STATE="$release_state" EXPECTED_PRERELEASE="$expected_prerelease" python3 - <<'PY'
+          import json, os
+          state = json.loads(os.environ["RELEASE_STATE"])
+          expected = os.environ["EXPECTED_PRERELEASE"] == "true"
+          if state.get("isDraft") or not state.get("isImmutable") or state.get("isPrerelease") != expected:
+              raise SystemExit("published release state does not match the requested immutable channel")
+          PY
+          trap - EXIT INT TERM
+      - name: Verify existing immutable release
+        if: steps.preflight.outputs.already_published == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_TAG: ${{ inputs.source_tag }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          state="$(gh release view "$SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable,isPrerelease)"
+          expected_prerelease=false
+          [[ "$CHANNEL" != beta ]] || expected_prerelease=true
+          [[ "$(jq -r .isDraft <<<"$state")" == false && \
+             "$(jq -r .isImmutable <<<"$state")" == true && \
+             "$(jq -r .isPrerelease <<<"$state")" == "$expected_prerelease" ]] || {
+            echo "Existing release state does not match the requested immutable channel." >&2
+            exit 1
+          }
+          mkdir existing-download
+          gh release download "$SOURCE_TAG" --dir existing-download --repo "$GITHUB_REPOSITORY"
+          mapfile -t existing_assets < <(find existing-download -maxdepth 1 -type f -printf '%f\n' | sort)
+          mapfile -t expected_assets < <(find candidate -maxdepth 1 -type f -printf '%f\n' | sort)
+          [[ "$(printf '%s\n' "${existing_assets[@]}")" == "$(printf '%s\n' "${expected_assets[@]}")" ]] || {
+            echo "Existing release assets differ from the verified candidate." >&2
+            exit 1
+          }
+          (cd existing-download && sha256sum -c SHA256SUMS.txt)
+          for asset in "${expected_assets[@]}"; do
+            cmp "candidate/$asset" "existing-download/$asset"
+          done
+      - name: Update beta manifest pointer
+        if: inputs.channel == 'beta'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          content="$(base64 -w 0 candidate/latest.json)"
+          existing="$(gh api "repos/${GITHUB_REPOSITORY}/contents/latest.json?ref=beta" --jq .sha 2>/dev/null || true)"
+          payload=("repos/${GITHUB_REPOSITORY}/contents/latest.json" -f message="chore: update beta manifest" -f branch=beta -f content="$content")
+          if [[ -n "$existing" ]]; then payload+=(-f sha="$existing"); fi
+          gh api -X PUT "${payload[@]}" >/dev/null
+      - name: Verify public downloads
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_TAG: ${{ inputs.source_tag }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          mkdir downloaded
+          gh release download "$SOURCE_TAG" --dir downloaded --repo "$GITHUB_REPOSITORY"
+          mapfile -t downloaded_assets < <(find downloaded -maxdepth 1 -type f -printf '%f\n' | sort)
+          mapfile -t expected_assets < <(find candidate -maxdepth 1 -type f -printf '%f\n' | sort)
+          [[ "$(printf '%s\n' "${downloaded_assets[@]}")" == "$(printf '%s\n' "${expected_assets[@]}")" ]] || {
+            echo "Public release assets differ from the verified candidate." >&2
+            exit 1
+          }
+          (cd downloaded && sha256sum -c SHA256SUMS.txt)
+          for asset in "${expected_assets[@]}"; do
+            cmp "candidate/$asset" "downloaded/$asset"
+          done
+          public_url="https://github.com/Jia-Ethan/keysmith-switch-releases/releases/download/$SOURCE_TAG/latest.json"
+          if [[ "$CHANNEL" == beta ]]; then
+            public_url="https://raw.githubusercontent.com/Jia-Ethan/keysmith-switch-releases/beta/latest.json"
+          fi
+          curl --fail --location --retry 5 --output /tmp/latest.json "$public_url"
+          cmp downloaded/latest.json /tmp/latest.json

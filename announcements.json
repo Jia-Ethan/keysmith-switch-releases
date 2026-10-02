@@ -19,6 +19,22 @@
       "tools": []
     },
     {
+      "id": "2026-10-v0.3.2",
+      "kind": "release",
+      "publishedAt": "2026-10-02T12:39:25Z",
+      "title": {
+        "zh-CN": "v0.3.2：修复部署状态显示",
+        "en": "v0.3.2: deployment status fix",
+        "zh-TW": "v0.3.2：修復部署狀態顯示"
+      },
+      "body": {
+        "zh-CN": "修复了一个状态显示矛盾的问题：Agent 的配置在部署后被手动改过时，页面顶部会显示“还没有部署提示词”，下面的列表却显示“部署中”。现在顶部会正常显示正在使用的提示词，并提示配置被手动改过；你可以重新部署，或用“清理”从头开始。",
+        "en": "Fixed a contradictory status: when an agent's config was changed by hand after a deploy, the top of the page said no prompt was deployed while the list below showed one as live. The top now shows the prompt in use and notes that the config was edited by hand; you can redeploy, or use Clean up to start over.",
+        "zh-TW": "修復了一個狀態顯示矛盾的問題：Agent 的設定在部署後被手動改過時，頁面頂部會顯示「還沒有部署提示詞」，下面的列表卻顯示「部署中」。現在頂部會正常顯示正在使用的提示詞，並提示設定被手動改過；你可以重新部署，或用「清理」從頭開始。"
+      },
+      "link": "https://github.com/Jia-Ethan/keysmith-switch-releases/releases/tag/v0.3.2"
+    },
+    {
       "id": "2026-10-v0.3.1",
       "kind": "release",
       "publishedAt": "2026-10-02T10:25:46Z",

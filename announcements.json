@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "announcements": [
+    {
+      "id": "2026-10-models-and-login",
+      "kind": "news",
+      "publishedAt": "2026-10-02T12:00:00Z",
+      "title": {
+        "zh-CN": "支持的模型与登录方式",
+        "en": "Supported models and how to sign in",
+        "zh-TW": "支援的模型與登入方式"
+      },
+      "body": {
+        "zh-CN": "请用 API 登录，不要用账号登录：用 API 登录效果更好。\n\n官方提示词目前支持到以下模型（更早的版本也支持）：\n· GPT：GPT-6.1 SOL\n· Claude：Claude Opus 5.5\n· Grok：Grok 4.6\n· GLM：GLM 5.3\n\n更新的模型版本还在准备中。",
+        "en": "Please sign in with an API key rather than an account: it works better.\n\nThe official prompts currently support these models (and earlier versions):\n· GPT: GPT-6.1 SOL\n· Claude: Claude Opus 5.5\n· Grok: Grok 4.6\n· GLM: GLM 5.3\n\nSupport for newer models is in preparation.",
+        "zh-TW": "請用 API 登入，不要用帳號登入：用 API 登入效果更好。\n\n官方提示詞目前支援到以下模型（更早的版本也支援）：\n· GPT：GPT-6.1 SOL\n· Claude：Claude Opus 5.5\n· Grok：Grok 4.6\n· GLM：GLM 5.3\n\n更新的模型版本還在準備中。"
+      },
+      "pinned": true,
+      "tools": []
+    },
+    {
+      "id": "2026-10-v0.3.1",
+      "kind": "release",
+      "publishedAt": "2026-10-02T10:25:46Z",
+      "title": {
+        "zh-CN": "v0.3.1：新增公告",
+        "en": "v0.3.1: announcements",
+        "zh-TW": "v0.3.1：新增公告"
+      },
+      "body": {
+        "zh-CN": "左侧栏多了铃铛，有新公告时会出现小红点；重要公告会置顶在 Agent 页面，可以关闭。",
+        "en": "A bell on the left rail shows a dot when there is a new announcement; important ones are pinned on the agent pages and can be closed.",
+        "zh-TW": "左側欄多了鈴鐺，有新公告時會出現小紅點；重要公告會置頂在 Agent 頁面，可以關閉。"
+      },
+      "link": "https://github.com/Jia-Ethan/keysmith-switch-releases/releases/tag/v0.3.1"
+    },
+    {
+      "id": "2026-10-v0.3.0",
+      "kind": "release",
+      "publishedAt": "2026-10-02T07:40:53Z",
+      "title": {
+        "zh-CN": "v0.3.0：完整清理",
+        "en": "v0.3.0: full cleanup",
+        "zh-TW": "v0.3.0：完整清理"
+      },
+      "body": {
+        "zh-CN": "“清理”现在能把 Claude Code、Codex、Grok 和 ZCode 清回刚安装的样子，包括登录和会话历史；配置先存一份不含登录的版本，可以回滚。",
+        "en": "Cleanup now returns Claude Code, Codex, Grok and ZCode to a fresh install, logins and session history included; config is saved first without logins and can be rolled back.",
+        "zh-TW": "「清理」現在能把 Claude Code、Codex、Grok 和 ZCode 清回剛安裝的樣子，包括登入和工作階段歷史；設定先存一份不含登入的版本，可以回滾。"
+      },
+      "link": "https://github.com/Jia-Ethan/keysmith-switch-releases/releases/tag/v0.3.0"
+    }
+  ]
+}

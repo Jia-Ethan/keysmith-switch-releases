@@ -2,6 +2,41 @@
   "schema": 1,
   "announcements": [
     {
+      "id": "2026-10-v0.3.7",
+      "kind": "release",
+      "publishedAt": "2026-10-06T05:00:00Z",
+      "title": {
+        "zh-CN": "v0.3.7：修复 Windows 弹窗与更新超时",
+        "en": "v0.3.7: Windows console windows and update timeouts fixed",
+        "zh-TW": "v0.3.7：修復 Windows 彈窗與更新逾時"
+      },
+      "body": {
+        "zh-CN": "修复了 Windows 上的两个问题：\n· 反复弹出命令行窗口：检查更新、检测和安装官方 CLI、取消任务、清理前的进程检查、反馈入口都会弹黑窗，现在都不再弹出。\n· 使用系统代理时检查更新超时：之前检查更新强制不走代理，用 Clash、v2rayN 等设置了系统代理的用户会看到“offline: curl: (28) Operation timed out”。现在会读取 Windows 系统代理。检查更新的等待时间也从 20 秒延长到 30 秒。\n\n这一版的 Windows 修复还没有在真实 Windows 机器上完整验证；如果仍然遇到问题，请通过应用内的反馈入口告诉我们。",
+        "en": "Fixed two Windows problems:\n· Console windows popping up repeatedly: checking for updates, detecting and installing official CLIs, cancelling a task, the process check before Clean up and the feedback form all flashed a black window. They no longer do.\n· Update check timing out behind a system proxy: the update check used to bypass every proxy, so people using Clash, v2rayN or similar saw “offline: curl: (28) Operation timed out”. It now reads the Windows system proxy, and the wait for the update check is 30 seconds instead of 20.\n\nThese Windows fixes have not been fully verified on a real Windows machine yet; if you still hit a problem, please tell us through the in-app feedback.",
+        "zh-TW": "修復了 Windows 上的兩個問題：\n· 反覆彈出命令列視窗：檢查更新、偵測與安裝官方 CLI、取消任務、清理前的程序檢查、回饋入口都會彈出黑視窗，現在都不再彈出。\n· 使用系統代理時檢查更新逾時：之前檢查更新強制不走代理，使用 Clash、v2rayN 等設定了系統代理的使用者會看到「offline: curl: (28) Operation timed out」。現在會讀取 Windows 系統代理。檢查更新的等待時間也從 20 秒延長到 30 秒。\n\n這一版的 Windows 修復還沒有在真實 Windows 機器上完整驗證；如果仍然遇到問題，請透過應用內的回饋入口告訴我們。"
+      },
+      "link": "https://github.com/Jia-Ethan/keysmith-switch-releases/releases/tag/v0.3.7"
+    },
+    {
+      "id": "2026-10-update-timeout-manual",
+      "kind": "news",
+      "publishedAt": "2026-10-06T05:05:00Z",
+      "title": {
+        "zh-CN": "更新超时的话，请手动下载 v0.3.7",
+        "en": "If updating times out, download v0.3.7 manually",
+        "zh-TW": "更新逾時的話，請手動下載 v0.3.7"
+      },
+      "body": {
+        "zh-CN": "如果你在 Windows 上点“更新并重启”时看到“offline: curl: (28) Operation timed out”，是旧版本检查更新时不走系统代理造成的，应用内更新无法成功。\n\n请到发布页下载 v0.3.7 的安装包，手动安装一次，之后的更新就会正常。",
+        "en": "If “Update and restart” on Windows shows “offline: curl: (28) Operation timed out”, older versions bypass the system proxy when checking for updates, so updating inside the app cannot succeed.\n\nPlease download the v0.3.7 installer from the releases page and install it once; updates will work normally after that.",
+        "zh-TW": "如果你在 Windows 上按「更新並重新啟動」時看到「offline: curl: (28) Operation timed out」，是舊版本檢查更新時不走系統代理所造成，應用內更新無法成功。\n\n請到發布頁下載 v0.3.7 的安裝檔，手動安裝一次，之後的更新就會正常。"
+      },
+      "pinned": true,
+      "tools": [],
+      "maxAppVersion": "0.3.6",
+      "link": "https://github.com/Jia-Ethan/keysmith-switch-releases/releases/tag/v0.3.7"
+    },
+    {
       "id": "2026-10-models-and-login",
       "kind": "news",
       "publishedAt": "2026-10-02T12:00:00Z",

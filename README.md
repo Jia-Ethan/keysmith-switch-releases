@@ -23,3 +23,7 @@ The repository must contain only the macOS bootstrap DMG, updater-signed payload
 3. The protected `production` environment gates the publishing job. Existing tags and Releases are immutable and are never overwritten.
 
 Required public-repository Secrets are `SOURCE_ARTIFACT_DOWNLOAD_TOKEN`, `SOURCE_REPOSITORY_DEPLOY_KEY_B64`, and `TAURI_UPDATER_PUBLIC_KEY`. The repository deliberately has no production updater private-key Secret.
+
+## Community
+
+- [Telegram group](https://t.me/+xBqLYA65JPU1NjFk)
